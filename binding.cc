@@ -391,6 +391,10 @@ context* context_new(worker* w, worker_recv_cb cb, worker_recvSync_cb recvSync_c
   return c;
 }
 
+void worker_terminate(worker* w) {
+	V8::TerminateExecution(w->isolate);
+}
+
 worker* worker_new(void* data) {
   Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = &array_buffer_allocator;

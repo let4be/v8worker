@@ -104,6 +104,10 @@ func (w *Worker) Load(c *Context, scriptName string, code string) error {
 	return nil
 }
 
+func (w *Worker) Terminate() {
+	C.worker_terminate(w.cWorker);
+}
+
 // Sends a message to a worker. The $recv callback in js will be called.
 func (w *Worker) Send(c *Context, msg string) error {
 	msg_s := C.CString(string(msg))

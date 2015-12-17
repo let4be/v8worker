@@ -18,6 +18,7 @@ void v8_init();
 
 worker* worker_new(void* data);
 context* context_new(worker* w, worker_recv_cb cb, worker_recvSync_cb recvSync_cb, void* data);
+void worker_terminate(worker* w);
 
 // returns nonzero on error
 // get error from worker_last_exception
