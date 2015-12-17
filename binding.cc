@@ -3,25 +3,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
-#include <atomic>
+#include <map>
 #include "v8.h"
 #include "libplatform/libplatform.h"
 #include "binding.h"
 
 using namespace v8;
 
-struct worker_s {  
-  void* data;
-  std::string last_exception;
-  Isolate* isolate;
-};
-
 struct context_s {
+  int id;
+  void* data;
   Persistent<Context> context;	
   worker_recv_cb cb;
   worker_recvSync_cb req_cb;
   Persistent<Function> recv;
   Persistent<Function> recv_sync_handler;
+};
+
+struct worker_s {  
+  void* data;
+  int32_t contextIndex;
+  std::string last_exception;  
+  std::map<int32_t, context*> contexts;
+  
+  Isolate* isolate;
 };
 
 // Extracts a C string from a V8 Utf8Value.
@@ -141,8 +146,7 @@ int worker_load(worker* w, context *c, char* name_s, char* source_s) {
     w->last_exception = ExceptionString(w->isolate, &try_catch);
     return 1;
   }
-
-  w->isolate->SetData(1, c);
+  
   Handle<Value> result = script->Run();
 
   if (result.IsEmpty()) {
@@ -175,13 +179,15 @@ void Print(const FunctionCallbackInfo<Value>& args) {
 void Recv(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
   worker* w = (worker*)isolate->GetData(0);
-  context *c = static_cast<context*>(isolate->GetData(1));
   assert(w->isolate == isolate);
 
   HandleScope handle_scope(isolate);
 
-  Local<Context> context = Local<Context>::New(w->isolate, c->context);
-  Context::Scope context_scope(context);
+  Local<Context> ctx = isolate->GetCurrentContext();
+  Context::Scope context_scope(ctx);
+    
+  int value = ctx->Global()->Get(String::NewFromUtf8(w->isolate, "$context"))->Int32Value();  
+  context* c = w->contexts[value];
 
   Local<Value> v = args[0];
   assert(v->IsFunction());
@@ -193,13 +199,16 @@ void Recv(const FunctionCallbackInfo<Value>& args) {
 void RecvSync(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
   worker* w = (worker*)isolate->GetData(0);
-  context *c = static_cast<context*>(isolate->GetData(1));
+ 
   assert(w->isolate == isolate);
 
   HandleScope handle_scope(isolate);
 
-  Local<Context> context = Local<Context>::New(w->isolate, c->context);
-  Context::Scope context_scope(context);
+  Local<Context> ctx = isolate->GetCurrentContext();
+  Context::Scope context_scope(ctx);
+    
+  int value = ctx->Global()->Get(String::NewFromUtf8(w->isolate, "$context"))->Int32Value();  
+  context* c = w->contexts[value];
 
   Local<Value> v = args[0];
   assert(v->IsFunction());
@@ -211,20 +220,22 @@ void RecvSync(const FunctionCallbackInfo<Value>& args) {
 // Called from javascript. Must route message to golang.
 void Send(const FunctionCallbackInfo<Value>& args) {
   std::string msg;
-  worker* w = NULL;
+  worker* w = NULL;  
   context *c = NULL;
   {
     Isolate* isolate = args.GetIsolate();
-    w = static_cast<worker*>(isolate->GetData(0));
-	c = static_cast<context*>(isolate->GetData(1));
+    w = static_cast<worker*>(isolate->GetData(0));	
     assert(w->isolate == isolate);
 
     Locker locker(w->isolate);
     HandleScope handle_scope(isolate);
 
-    Local<Context> context = Local<Context>::New(w->isolate, c->context);
-    Context::Scope context_scope(context);
-
+	Local<Context> ctx = isolate->GetCurrentContext();
+	Context::Scope context_scope(ctx);
+	
+	int value = ctx->Global()->Get(String::NewFromUtf8(w->isolate, "$context"))->Int32Value();
+    c = w->contexts[value];
+	
     Local<Value> v = args[0];
     assert(v->IsString());
 
@@ -233,7 +244,7 @@ void Send(const FunctionCallbackInfo<Value>& args) {
   }
 
   // XXX should we use Unlocker?
-  c->cb(msg.c_str(), c);
+  c->cb(msg.c_str(), c->data);
 }
 
 // Called from javascript using $request.
@@ -244,15 +255,17 @@ void SendSync(const FunctionCallbackInfo<Value>& args) {
   context *c = NULL;
   {
     Isolate* isolate = args.GetIsolate();
-    w = static_cast<worker*>(isolate->GetData(0));
-	c = static_cast<context*>(isolate->GetData(1));
+    w = static_cast<worker*>(isolate->GetData(0));	
     assert(w->isolate == isolate);
 
     Locker locker(w->isolate);
     HandleScope handle_scope(isolate);
 
-    Local<Context> context = Local<Context>::New(w->isolate, c->context);
-    Context::Scope context_scope(context);
+    Local<Context> ctx = isolate->GetCurrentContext();
+	Context::Scope context_scope(ctx);
+	
+	int value = ctx->Global()->Get(String::NewFromUtf8(w->isolate, "$context"))->Int32Value();  
+    c = w->contexts[value];
 
     Local<Value> v = args[0];
     assert(v->IsString());
@@ -260,7 +273,7 @@ void SendSync(const FunctionCallbackInfo<Value>& args) {
     String::Utf8Value str(v);
     msg = ToCString(str);
   }
-  const char* returnMsg = c->req_cb(msg.c_str(), c);
+  const char* returnMsg = c->req_cb(msg.c_str(), c->data);
   Local<String> returnV = String::NewFromUtf8(w->isolate, returnMsg);
   args.GetReturnValue().Set(returnV);
 }
@@ -287,8 +300,7 @@ int worker_send(worker* w, context* c, const char* msg) {
   args[0] = String::NewFromUtf8(w->isolate, msg);
 
   assert(!try_catch.HasCaught());
-
-  w->isolate->SetData(1, c);
+  
   recv->Call(context->Global(), 1, args);
 
   if (try_catch.HasCaught()) {
@@ -318,8 +330,7 @@ const char* worker_sendSync(worker* w, context* c, const char* msg) {
 
   Local<Value> args[1];
   args[0] = String::NewFromUtf8(w->isolate, msg);
-  
-  w->isolate->SetData(1, c);
+    
   Local<Value> response_value = recv_sync_handler->Call(context->Global(), 1, args);
 
   if (response_value->IsString()) {
@@ -340,13 +351,16 @@ void v8_init() {
   V8::InitializePlatform(platform);
 }
 
-context* context_new(worker* w, worker_recv_cb cb, worker_recvSync_cb recvSync_cb) {  
+context* context_new(worker* w, worker_recv_cb cb, worker_recvSync_cb recvSync_cb, void* data) {  
   Locker locker(w->isolate);
   Isolate::Scope isolate_scope(w->isolate);
   HandleScope handle_scope(w->isolate);
 
   Local<ObjectTemplate> global = ObjectTemplate::New(w->isolate);
 
+  global->Set(String::NewFromUtf8(w->isolate, "$context"),
+			  Integer::New(w->isolate, w->contextIndex));
+  
   global->Set(String::NewFromUtf8(w->isolate, "$print"),
               FunctionTemplate::New(w->isolate, Print));
 
@@ -361,13 +375,18 @@ context* context_new(worker* w, worker_recv_cb cb, worker_recvSync_cb recvSync_c
 
   global->Set(String::NewFromUtf8(w->isolate, "$recvSync"),
               FunctionTemplate::New(w->isolate, RecvSync));
-
+			  
   Local<Context> localContext = Context::New(w->isolate, NULL, global);
   
   context* c = new(context);
+  c->id = w->contextIndex;
+  c->data = data;
   c->cb = cb;
   c->req_cb = recvSync_cb;
   c->context.Reset(w->isolate, localContext);
+
+  w->contexts.insert(std::make_pair(w->contextIndex, c));
+  w->contextIndex++;
   
   return c;
 }
@@ -385,6 +404,7 @@ worker* worker_new(void* data) {
   w->isolate->SetCaptureStackTraceForUncaughtExceptions(true);
   w->isolate->SetData(0, w);
   w->data = data;
+  w->contextIndex = 0;
   
   return w;
 }

@@ -42,9 +42,9 @@ func Version() string {
 }
 
 //export recvCb
-func recvCb(msg_s *C.char, ptr unsafe.Pointer) {
+func recvCb(msg_s *C.char, ptr unsafe.Pointer) {	
 	msg := C.GoString(msg_s)
-	context := (*Context)(ptr)
+	context := (*Context)(ptr)	
 	context.cb(msg)
 }
 
@@ -81,7 +81,7 @@ func NewContext(w *Worker, cb ReceiveMessageCallback, recvSync_cb ReceiveSyncMes
 	callback := C.worker_recv_cb(C.go_recv_cb)
 	receiveSync_callback := C.worker_recvSync_cb(C.go_recvSync_cb)
 
-	context.cContext = C.context_new(w.cWorker, callback, receiveSync_callback)	
+	context.cContext = C.context_new(w.cWorker, callback, receiveSync_callback, unsafe.Pointer(context))	
 	runtime.SetFinalizer(context, func(final_context *Context) {
 		C.context_dispose(final_context.cContext);
 	})
